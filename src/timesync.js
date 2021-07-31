@@ -8,16 +8,13 @@
 
 import * as util from './util.js';
 import * as stat from './stat.js';
-import * as request from './request/request';
-import emitter from './emitter.js';
-var Promise = require('./Promise');
 
 /**
  * Factory function to create a timesync instance
  * @param {Object} [options]  TODO: describe options
  * @return {Object} Returns a new timesync instance
  */
-export function create(options) {
+class TimeSync extends create(options) {
   var timesync = {
     // configurable options
     options: {
@@ -266,8 +263,8 @@ export function create(options) {
     }
   };
 
-  // apply provided options
-  if (options) {
+  constructor(options) {
+    // apply provided options
     if (options.server && options.peers) {
       throw new Error('Configure either option "peers" or "server", not both.');
     }
@@ -276,45 +273,26 @@ export function create(options) {
       if (options.hasOwnProperty(prop)) {
         if (prop === 'peers' && typeof options.peers === 'string') {
           // split a comma separated string with peers into an array
-          timesync.options.peers = options.peers
+          this.options.peers = options.peers
               .split(',')
               .map(peer => peer.trim())
               .filter(peer => peer !== '');
         }
         else {
-          timesync.options[prop] = options[prop];
+          this.options[prop] = options[prop];
         }
       }
     }
-  }
 
-  // turn into an event emitter
-  emitter(timesync);
+    if (options.interval !== null) {
+      // start an interval to automatically run a synchronization once per interval
+      this._timeout = setInterval(this.sync, this.options.interval);
 
-  /**
-   * Emit an error message. If there are no listeners, the error is outputted
-   * to the console.
-   * @param {Error} err
-   */
-  function emitError(err) {
-    if (timesync.list('error').length > 0) {
-      timesync.emit('error', err);
-    }
-    else {
-      console.log('Error', err);
+      // synchronize immediately on the next tick (allows to attach event
+      // handlers before the timesync starts).
+      setTimeout(function () {
+        this.sync().catch(err => emitError(err));
+      }, 0);
     }
   }
-
-  if (timesync.options.interval !== null) {
-    // start an interval to automatically run a synchronization once per interval
-    timesync._timeout = setInterval(timesync.sync, timesync.options.interval);
-
-    // synchronize immediately on the next tick (allows to attach event
-    // handlers before the timesync starts).
-    setTimeout(function () {
-      timesync.sync().catch(err => emitError(err));
-    }, 0);
-  }
-
-  return timesync;
 }
