@@ -14,13 +14,13 @@ import * as stat from './stat.js';
  * @param {Object} [options]  TODO: describe options
  * @return {Object} Returns a new timesync instance
  */
-class TimeSync extends create(options) {
+export class TimeSync extends EventTarget {
 
   /** @type {number} The current offset from system time */
   offset: 0 // ms
 
   /** @type {number} Contains the timeout for the next synchronization */
-  _timeout: null
+  _interval: null
 
   /** @type {Object.<string, function>} Contains a map with requests in progress */
   _inProgress: {}
@@ -38,16 +38,13 @@ class TimeSync extends create(options) {
    * @param {string} to
    * @param {*} data
    */
-  send: function (to, data, timeout) {
-      return request.post(to, data, timeout)
-          .then(function (val) {
-            var res = val[0];
-
-            timesync.receive(to, res);
-          })
-          .catch(function (err) {
-            emitError(err);
-          });
+  send: async function (to, data, timeout) {
+    try {
+      const res = await request.post(to, data, timeout);
+      this.receive(to, res[0]);
+    } catch(err) {
+      emitError(err);
+    };
   }
 
   /**
@@ -61,23 +58,23 @@ class TimeSync extends create(options) {
       from = undefined;
     }
 
-    if (data && data.id in timesync._inProgress) {
+    if (data && data.id in this._inProgress) {
       // this is a reply
-      timesync._inProgress[data.id](data.result);
+      this._inProgress[data.id](data.result);
     }
     else if (data && data.id !== undefined) {
       // this is a request from an other peer
       // reply with our current time
-      timesync.send(from, {
+      this.send(from, {
         jsonrpc: '2.0',
         id: data.id,
-        result: timesync.now()
+        result: this.now()
       })
     }
   }
 
   _handleRPCSendError: function (id, reject, err) {
-    delete timesync._inProgress[id];
+    delete this._inProgress[id];
     reject(new Error('Send failure'));
   }
 
@@ -89,15 +86,15 @@ class TimeSync extends create(options) {
    * @returns {Promise}
    */
   rpc: function (to, method, params) {
-    var id = util.nextId();
-    var resolve, reject;
-    var deferred = new Promise((res, rej) => {
+    const id = util.nextId();
+    let resolve, reject;
+    const deferred = new Promise((res, rej) => {
       resolve = res;
       reject = rej;
     });
 
-    timesync._inProgress[id] = function (data) {
-      delete timesync._inProgress[id];
+    this._inProgress[id] = function (data) {
+      delete this._inProgress[id];
 
       resolve(data);
     };
@@ -105,18 +102,18 @@ class TimeSync extends create(options) {
     let sendResult; 
     
     try {
-      sendResult = timesync.send(to, {
+      sendResult = this.send(to, {
         jsonrpc: '2.0',
         id: id,
         method: method,
         params: params
-      }, timesync.options.timeout);
+      }, this.options.timeout);
     } catch(err) {
-      timesync._handleRPCSendError(id, reject, err);
+      this._handleRPCSendError(id, reject, err);
     }
 
     if (sendResult && (sendResult instanceof Promise || (sendResult.then && sendResult.catch))) {
-      sendResult.catch(timesync._handleRPCSendError.bind(this, id, reject));
+      sendResult.catch(this._handleRPCSendError.bind(this, id, reject));
     } else {
       console.warn('Send should return a promise');
     }
@@ -128,23 +125,21 @@ class TimeSync extends create(options) {
    * Synchronize now with all configured peers
    * Docs: http://www.mine-control.com/zack/timesync/timesync.html
    */
-  sync: function () {
-    timesync.emit('sync', 'start');
+  sync: async function () {
+    this.emit('sync', 'start');
 
-    var peers = timesync.options.server ?
-        [timesync.options.server] :
-        timesync.options.peers;
-    return Promise
-        .all(peers.map(peer => timesync._syncWithPeer(peer)))
-        .then(function (all) {
-          var offsets = all.filter(offset => timesync._validOffset(offset));
-          if (offsets.length > 0) {
-            // take the average of all peers (excluding self) as new offset
-            timesync.offset = stat.mean(offsets);
-            timesync.emit('change', timesync.offset);
-          }
-          timesync.emit('sync', 'end');
-        });
+    const peers = this.options.server ?
+      [this.options.server] :
+      this.options.peers;
+
+    const all = Promise.all(peers.map(peer => this._syncWithPeer(peer)));
+    const offsets = all.filter(offset => this._validOffset(offset));
+    if (offsets.length > 0) {
+      // take the average of all peers (excluding self) as new offset
+      this.offset = stat.mean(offsets);
+      this.emit('change', this.offset);
+    }
+    this.emit('sync', 'end');
   }
 
   /**
@@ -164,41 +159,38 @@ class TimeSync extends create(options) {
    *                                    or null if failed to sync with this peer.
    * @private
    */
-  _syncWithPeer: function (peer) {
+  _syncWithPeer: async function (peer) {
     // retrieve the offset of a peer, then wait 1 sec
-    var all = [];
+    const all = [];
 
     function sync () {
-      return timesync._getOffset(peer).then(result => all.push(result));
+      return this._getOffset(peer).then(result => all.push(result));
     }
 
     function waitAndSync() {
-      return util.wait(timesync.options.delay).then(sync);
+      return util.wait(this.options.delay).then(sync);
     }
 
     function notDone() {
-      return all.length < timesync.options.repeat;
+      return all.length < this.options.repeat;
     }
 
-    return sync()
-        .then(function () {
-          return util.whilst(notDone, waitAndSync)
-        })
-        .then(function () {
-          // filter out null results
-          var results = all.filter(result => result !== null);
+    await sync();
+    await util.whilst(notDone, waitAndSync);
 
-          // calculate the limit for outliers
-          var roundtrips = results.map(result => result.roundtrip);
-          var limit = stat.median(roundtrips) + stat.std(roundtrips);
+    // filter out null results
+    const results = all.filter(result => result !== null);
 
-          // filter all results which have a roundtrip smaller than the mean+std
-          var filtered = results.filter(result => result.roundtrip < limit);
-          var offsets = filtered.map(result => result.offset);
+    // calculate the limit for outliers
+    const roundtrips = results.map(result => result.roundtrip);
+    const limit = stat.median(roundtrips) + stat.std(roundtrips);
 
-          // return the new offset
-          return (offsets.length > 0) ? stat.mean(offsets) : null;
-        });
+    // filter all results which have a roundtrip smaller than the mean+std
+    const filtered = results.filter(result => result.roundtrip < limit);
+    const offsets = filtered.map(result => result.offset);
+
+    // return the new offset
+    return (offsets.length > 0) ? stat.mean(offsets) : null;
   }
 
   /**
@@ -207,31 +199,31 @@ class TimeSync extends create(options) {
    * @returns {Promise.<{roundtrip: number, offset: number} | null>}
    * @private
    */
-  _getOffset: function (peer) {
-    var start = timesync.options.now(); // local system time
+  _getOffset: async function (peer) {
+    const start = this.options.now(); // local system time
 
-    return timesync.rpc(peer, 'timesync')
-        .then(function (timestamp) {
-          var end = timesync.options.now(); // local system time
-          var roundtrip = end - start;
-          var offset = timestamp - end + roundtrip / 2; // offset from local system time
+    try {
+      const timestamp = await this.rpc(peer, 'timesync')
+    } catch(err) {
+      // just ignore failed requests, return null
+      return null;
+    }
 
-          // apply the first ever retrieved offset immediately.
-          if (timesync._isFirst) {
-            timesync._isFirst = false;
-            timesync.offset = offset;
-            timesync.emit('change', offset);
-          }
+    const end = this.options.now(); // local system time
+    const roundtrip = end - start;
+    const offset = timestamp - end + roundtrip / 2; // offset from local system time
 
-          return {
-            roundtrip: roundtrip,
-            offset: offset
-          };
-        })
-        .catch(function (err) {
-          // just ignore failed requests, return null
-          return null;
-        });
+    // apply the first ever retrieved offset immediately.
+    if (this._isFirst) {
+      this._isFirst = false;
+      this.offset = offset;
+      this.emit('change', offset);
+    }
+
+    return {
+      roundtrip: roundtrip,
+      offset: offset
+    };
   }
 
   /**
@@ -239,7 +231,7 @@ class TimeSync extends create(options) {
    * @returns {number} Returns a timestamp
    */
   now: function () {
-    return timesync.options.now() + timesync.offset;
+    return this.options.now() + this.offset;
   }
 
   /**
@@ -248,7 +240,8 @@ class TimeSync extends create(options) {
    * synchronization will be finished first.
    */
   destroy: function () {
-    clearTimeout(timesync._timeout);
+    clearInterval(this._interval);
+    this._interval = null;
   }
 
   static defaultOptions = {
@@ -262,7 +255,6 @@ class TimeSync extends create(options) {
   }
 
   constructor(options) {
-
     // apply provided options
     if (options.server && options.peers) {
       throw new Error('Configure either option "peers" or "server", not both.');
@@ -280,7 +272,7 @@ class TimeSync extends create(options) {
 
     if (this.options.interval !== null) {
       // start an interval to automatically run a synchronization once per interval
-      this._timeout = setInterval(this.sync, this.options.interval);
+      this._interval = setInterval(this.sync, this.options.interval);
 
       // synchronize immediately on the next tick (allows to attach event
       // handlers before the timesync starts).
