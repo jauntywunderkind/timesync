@@ -15,17 +15,6 @@ import * as stat from './stat.js';
  * @return {Object} Returns a new timesync instance
  */
 class TimeSync extends create(options) {
-  var timesync = {
-    // configurable options
-    options: {
-      interval: 60 * 60 * 1000, // interval for doing synchronizations in ms. Set to null to disable auto sync
-      timeout: 10000,           // timeout for requests to fail in ms
-      delay: 1000,              // delay between requests in ms
-      repeat: 5,                // number of times to do a request to one peer
-      peers: [],                // uri's or id's of the peers
-      server: null,             // uri of a single server (master/slave configuration)
-      now: Date.now             // function returning the system time
-    }
 
   /** @type {number} The current offset from system time */
   offset: 0 // ms
@@ -262,28 +251,34 @@ class TimeSync extends create(options) {
     clearTimeout(timesync._timeout);
   }
 
+  static defaultOptions = {
+    interval: 60 * 60 * 1000, // interval for doing synchronizations in ms. Set to null to disable auto sync
+    timeout: 10000,           // timeout for requests to fail in ms
+    delay: 1000,              // delay between requests in ms
+    repeat: 5,                // number of times to do a request to one peer
+    peers: [],                // uri's or id's of the peers
+    server: null,             // uri of a single server (master/slave configuration)
+    now: Date.now             // function returning the system time
+  }
+
   constructor(options) {
+
     // apply provided options
     if (options.server && options.peers) {
       throw new Error('Configure either option "peers" or "server", not both.');
     }
 
-    for (var prop in options) {
-      if (options.hasOwnProperty(prop)) {
-        if (prop === 'peers' && typeof options.peers === 'string') {
-          // split a comma separated string with peers into an array
-          this.options.peers = options.peers
-              .split(',')
-              .map(peer => peer.trim())
-              .filter(peer => peer !== '');
-        }
-        else {
-          this.options[prop] = options[prop];
-        }
-      }
+    this.options = {...TimeSync.defaultOptions, ...options};
+
+    if typeof this.options.peers === 'string') {
+      // split a comma separated string with peers into an array
+      this.options.peers = this.options.peers
+        .split(',')
+        .map(peer => peer.trim())
+        .filter(peer => peer !== '');
     }
 
-    if (options.interval !== null) {
+    if (this.options.interval !== null) {
       // start an interval to automatically run a synchronization once per interval
       this._timeout = setInterval(this.sync, this.options.interval);
 
